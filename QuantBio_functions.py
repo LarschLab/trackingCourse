@@ -8,6 +8,9 @@ import pandas as pd
 import os
 import glob
 
+DEFAULT_GT_IDS = ("gt1", "gt2", "gt3")
+DEFAULT_ANNOTATOR_SUFFIXES = ("annotatorA", "annotatorB", "annotatorC")
+
 #converting temporal segments to frames from the online annotator and combining ground truth data; can be removed before handing off to students?
 
 def get_total_frames_from_video(video_path):
@@ -244,6 +247,191 @@ def process_dataset_folder(
     out_path = os.path.join(folder_path, out_name)
     temporal_df.to_csv(out_path, index=False)
 
+    print("Saved:", out_path)
+
+    return out_path
+
+
+def get_quant_beh_data_dir(base_dir=None):
+    if base_dir is None:
+        base_dir = os.getcwd()
+    return os.path.abspath(os.path.join(base_dir, "..", "quantBehData"))
+
+
+def generate_final_label_file_for_gt(
+    gt_root,
+    gt_id,
+    annotator_suffixes=DEFAULT_ANNOTATOR_SUFFIXES,
+    fps=60,
+    method="majority"
+):
+
+    annotator_csvs = [
+        os.path.join(gt_root, f"{gt_id}_{suffix}.csv")
+        for suffix in annotator_suffixes
+    ]
+
+    missing = [path for path in annotator_csvs if not os.path.exists(path)]
+    if missing:
+        raise FileNotFoundError(f"Missing annotator files for {gt_id}: {missing}")
+
+    video_path = os.path.join(gt_root, f"{gt_id}.mp4")
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+
+    output_path = os.path.join(gt_root, f"{gt_id}_final_labels.csv")
+    generate_final_label_file(
+        annotator_csvs=annotator_csvs,
+        video_path=video_path,
+        output_path=output_path,
+        fps=fps,
+        method=method
+    )
+    return output_path
+
+
+def process_gt_id_from_flat_root(
+    gt_root,
+    gt_id,
+    fps=60,
+    window_size=40
+):
+
+    traj_file = os.path.join(gt_root, f"{gt_id}_trajectories.csv")
+    if not os.path.exists(traj_file):
+        raise FileNotFoundError(f"Trajectory file not found: {traj_file}")
+
+    label_file = os.path.join(gt_root, f"{gt_id}_manual_labeled_fights.csv")
+    if not os.path.exists(label_file):
+        raise FileNotFoundError(f"Label file not found: {label_file}")
+
+    print("Trajectory:", traj_file)
+    print("Labels:", label_file)
+
+    traj_df = pd.read_csv(traj_file)
+    features_df = compute_basic_features(traj_df, fps=fps)
+
+    label_df = pd.read_csv(label_file)
+    merged = pd.merge(features_df, label_df, on="frame", how="inner")
+
+    feature_columns = [
+        "inter_animal_distance",
+        "speed1", "speed2",
+        "acc1", "acc2",
+        "heading1", "heading2"
+    ]
+
+    temporal_df = generate_temporal_features(
+        merged,
+        feature_columns,
+        window_size=window_size
+    )
+
+    temporal_df = pd.merge(
+        temporal_df,
+        merged[["frame", "label"]],
+        on="frame",
+        how="left"
+    )
+
+    out_path = os.path.join(gt_root, f"{gt_id}_temporal_features_with_labels.csv")
+    temporal_df.to_csv(out_path, index=False)
+    print("Saved:", out_path)
+
+    return out_path
+
+
+def process_gt_datasets_from_flat_root(
+    gt_root,
+    gt_ids=DEFAULT_GT_IDS,
+    fps=60,
+    window_size=40,
+    skip_missing=False
+):
+
+    temporal_csvs = []
+
+    for gt_id in gt_ids:
+        try:
+            out_csv = process_gt_id_from_flat_root(
+                gt_root=gt_root,
+                gt_id=gt_id,
+                fps=fps,
+                window_size=window_size
+            )
+            temporal_csvs.append(out_csv)
+        except FileNotFoundError as err:
+            if skip_missing:
+                print(f"Skipping {gt_id}: {err}")
+                continue
+            raise
+
+    return temporal_csvs
+
+
+def list_gt_temporal_csvs_flat(gt_root):
+    return sorted(glob.glob(os.path.join(gt_root, "gt*_temporal_features_with_labels.csv")))
+
+
+def process_dataset_id_from_flat_root(
+    data_root,
+    dataset_id,
+    fps=60,
+    window_size=40,
+    require_labels=False
+):
+
+    traj_file = os.path.join(data_root, f"{dataset_id}_trajectories.csv")
+    if not os.path.exists(traj_file):
+        raise FileNotFoundError(f"Trajectory file not found: {traj_file}")
+
+    label_file = os.path.join(data_root, f"{dataset_id}_manual_labeled_fights.csv")
+    has_labels = os.path.exists(label_file)
+
+    if require_labels and not has_labels:
+        raise FileNotFoundError(f"Label file not found: {label_file}")
+
+    print("Trajectory:", traj_file)
+    if has_labels:
+        print("Labels:", label_file)
+    else:
+        print("No label file found — running in prediction mode.")
+
+    traj_df = pd.read_csv(traj_file)
+    features_df = compute_basic_features(traj_df, fps=fps)
+
+    if has_labels:
+        label_df = pd.read_csv(label_file)
+        merged = pd.merge(features_df, label_df, on="frame", how="inner")
+    else:
+        merged = features_df
+
+    feature_columns = [
+        "inter_animal_distance",
+        "speed1", "speed2",
+        "acc1", "acc2",
+        "heading1", "heading2"
+    ]
+
+    temporal_df = generate_temporal_features(
+        merged,
+        feature_columns,
+        window_size=window_size
+    )
+
+    if has_labels:
+        temporal_df = pd.merge(
+            temporal_df,
+            merged[["frame", "label"]],
+            on="frame",
+            how="left"
+        )
+        out_name = f"{dataset_id}_temporal_features_with_labels.csv"
+    else:
+        out_name = f"{dataset_id}_temporal_features.csv"
+
+    out_path = os.path.join(data_root, out_name)
+    temporal_df.to_csv(out_path, index=False)
     print("Saved:", out_path)
 
     return out_path
