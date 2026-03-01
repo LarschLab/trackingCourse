@@ -351,6 +351,135 @@ def ensure_quant_beh_data_from_zenodo(
     }
 
 
+def list_student_dense_annotation_files(
+    manual_annotations_dir,
+    gt_ids=DEFAULT_GT_IDS
+):
+    all_student_files = sorted(
+        glob.glob(os.path.join(manual_annotations_dir, "gt*_frames_dense.csv"))
+    )
+
+    student_files_by_gt = {gt: [] for gt in gt_ids}
+    suffix = "_frames_dense.csv"
+
+    for path in all_student_files:
+        name = os.path.basename(path)
+        for gt in gt_ids:
+            prefix = f"{gt}_"
+            if name.startswith(prefix) and name.endswith(suffix):
+                student_name = name[len(prefix):-len(suffix)]
+                student_files_by_gt[gt].append((student_name, path))
+                break
+
+    return student_files_by_gt
+
+
+def print_student_dense_annotation_options(
+    student_files_by_gt,
+    gt_ids=DEFAULT_GT_IDS
+):
+    for gt in gt_ids:
+        print(f"\n{gt} available student dense annotations:")
+        options = student_files_by_gt.get(gt, [])
+        for idx, (student_name, _) in enumerate(options):
+            print(f"  [{idx}] {student_name}")
+
+
+def resolve_student_selection(
+    student_files_by_gt,
+    selection_index,
+    gt_ids=DEFAULT_GT_IDS
+):
+    selected = {}
+    for gt in gt_ids:
+        options = student_files_by_gt.get(gt, [])
+        if len(options) == 0:
+            raise ValueError(f"No student annotation files found for {gt}")
+
+        idx = selection_index.get(gt, 0)
+        if not isinstance(idx, int) or idx < 0 or idx >= len(options):
+            idx = 0
+        selected[gt] = options[idx]
+
+    return selected
+
+
+def load_dense_labels_csv(path, n_total_frames):
+    df = pd.read_csv(path)
+    if "frame" not in df.columns or "label" not in df.columns:
+        raise ValueError(
+            f"Dense annotation file must contain 'frame' and 'label' columns: {path}"
+        )
+
+    out = pd.DataFrame({
+        "frame": np.arange(n_total_frames, dtype=int),
+        "label": np.zeros(n_total_frames, dtype=int),
+    })
+
+    tmp = df[["frame", "label"]].copy()
+    tmp["frame"] = pd.to_numeric(tmp["frame"], errors="coerce")
+    tmp["label"] = pd.to_numeric(tmp["label"], errors="coerce")
+    tmp = tmp.dropna()
+
+    if not tmp.empty:
+        tmp["frame"] = tmp["frame"].astype(int)
+        tmp["label"] = (tmp["label"] > 0).astype(int)
+        tmp = tmp[(tmp["frame"] >= 0) & (tmp["frame"] < n_total_frames)]
+        if not tmp.empty:
+            grp = tmp.groupby("frame", as_index=True)["label"].max()
+            out.loc[grp.index.to_numpy(), "label"] = grp.to_numpy().astype(int)
+
+    return out
+
+
+def load_selected_student_labels_by_gt(
+    selected_students,
+    teacher_labels_by_gt,
+    gt_ids=DEFAULT_GT_IDS,
+    verbose=True
+):
+    student_labels_by_gt = {}
+
+    for gt in gt_ids:
+        student_name, student_path = selected_students[gt]
+        n_total = len(teacher_labels_by_gt[gt])
+        student_labels_by_gt[gt] = load_dense_labels_csv(student_path, n_total)
+
+        if verbose:
+            print(
+                f"{gt} ({student_name}) -> fight fraction:",
+                float(student_labels_by_gt[gt]["label"].mean())
+            )
+
+    return student_labels_by_gt
+
+
+def build_consensus_labels_for_gt(
+    gt,
+    student_files_by_gt,
+    n_total_frames,
+    consensus_threshold=0.5
+):
+    options = student_files_by_gt[gt]
+    if len(options) == 0:
+        raise ValueError(f"No student annotation files for {gt}")
+
+    mat = np.zeros((len(options), n_total_frames), dtype=int)
+    for i, (_, path) in enumerate(options):
+        dense = load_dense_labels_csv(path, n_total_frames)
+        mat[i, :] = dense["label"].to_numpy(dtype=int)
+
+    vote_fraction = mat.mean(axis=0)
+    consensus = (vote_fraction >= consensus_threshold).astype(int)
+
+    out_df = pd.DataFrame({
+        "frame": np.arange(n_total_frames),
+        "label": consensus,
+        "vote_fraction": vote_fraction,
+    })
+    return out_df
+
+
 def generate_final_label_file_for_gt(
     gt_root,
     gt_id,
