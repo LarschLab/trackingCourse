@@ -7,6 +7,8 @@ from collections import deque
 import pandas as pd 
 import os
 import glob
+import json
+import urllib.request
 
 DEFAULT_GT_IDS = ("gt1", "gt2", "gt3")
 DEFAULT_ANNOTATOR_SUFFIXES = ("annotatorA", "annotatorB", "annotatorC")
@@ -256,6 +258,97 @@ def get_quant_beh_data_dir(base_dir=None):
     if base_dir is None:
         base_dir = os.getcwd()
     return os.path.abspath(os.path.join(base_dir, "..", "quantBehData"))
+
+
+def ensure_quant_beh_data_from_zenodo(
+    record_id="18817834",
+    data_dir=None,
+    required_files=None,
+    gt_ids=DEFAULT_GT_IDS,
+    include_new_dataset=True,
+    verbose=True
+):
+    if data_dir is None:
+        data_dir = get_quant_beh_data_dir()
+    data_dir = os.path.abspath(data_dir)
+    os.makedirs(data_dir, exist_ok=True)
+
+    if required_files is None:
+        required_files = []
+        for gt in gt_ids:
+            required_files.extend([
+                f"{gt}.mp4",
+                f"{gt}_trajectories.csv",
+                f"{gt}_manual_labeled_fights.csv",
+            ])
+        if include_new_dataset:
+            required_files.extend([
+                "new_dataset.mp4",
+                "new_dataset_trajectories.csv",
+            ])
+
+    missing_files = [
+        name for name in required_files
+        if not os.path.exists(os.path.join(data_dir, name))
+    ]
+
+    if verbose:
+        print("Data directory:", data_dir)
+        print("Missing required files:", len(missing_files))
+
+    if len(missing_files) == 0:
+        if verbose:
+            print("All required files already present. No download needed.")
+        return {
+            "data_dir": data_dir,
+            "downloaded": [],
+            "missing_on_record": [],
+            "missing_required": [],
+        }
+
+    api_url = f"https://zenodo.org/api/records/{record_id}"
+    with urllib.request.urlopen(api_url) as response:
+        record = json.load(response)
+
+    zenodo_files = record.get("files", [])
+    zenodo_by_name = {f.get("key"): f for f in zenodo_files if f.get("key")}
+
+    missing_on_record = [name for name in missing_files if name not in zenodo_by_name]
+    if verbose and len(missing_on_record) > 0:
+        print("Warning: files not found in Zenodo record:")
+        for name in missing_on_record:
+            print("  -", name)
+
+    downloaded = []
+    for name in missing_files:
+        file_meta = zenodo_by_name.get(name)
+        if file_meta is None:
+            continue
+
+        download_url = file_meta.get("links", {}).get("self")
+        if not download_url:
+            if verbose:
+                print(f"Skipping {name}: no download URL")
+            continue
+
+        destination = os.path.join(data_dir, name)
+        if verbose:
+            print(f"Downloading {name} ...")
+        urllib.request.urlretrieve(download_url, destination)
+        downloaded.append(name)
+
+    if verbose:
+        print("Download step complete.")
+
+    return {
+        "data_dir": data_dir,
+        "downloaded": downloaded,
+        "missing_on_record": missing_on_record,
+        "missing_required": [
+            name for name in required_files
+            if not os.path.exists(os.path.join(data_dir, name))
+        ],
+    }
 
 
 def generate_final_label_file_for_gt(
