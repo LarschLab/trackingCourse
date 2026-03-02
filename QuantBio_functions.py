@@ -261,7 +261,7 @@ def get_quant_beh_data_dir(base_dir=None):
 
 
 def ensure_quant_beh_data_from_zenodo(
-    record_id="18817834",
+    record_id="18835630",
     data_dir=None,
     required_files=None,
     gt_ids=DEFAULT_GT_IDS,
